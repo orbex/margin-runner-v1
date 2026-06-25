@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Margin Runner — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e1a; --surface: #111827; --card: #1a2236;
+    --border: #1f2a45; --text: #e2e8f0; --text-dim: #8892b0;
+    --green: #00e676; --green-dim: rgba(0,230,118,0.12);
+    --yellow: #fbbf24; --red: #ef4444; --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 32px; display: flex; align-items: center; height: 64px; gap: 32px; position: sticky; top: 0; z-index: 100; }
+  .nav-brand { font-weight: 800; font-size: 20px; color: var(--green); letter-spacing: -0.5px; }
+  .nav-brand small { font-weight: 400; font-size: 13px; color: var(--text-dim); margin-left: 8px; }
+  .nav-links { display: flex; gap: 4px; }
+  .nav-links a { color: var(--text-dim); text-decoration: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; transition: all 0.15s; }
+  .nav-links a:hover, .nav-links a.active { color: var(--text); background: rgba(255,255,255,0.06); }
+  .nav-links a.active { color: var(--green); }
+  .container { max-width: 1280px; margin: 0 auto; padding: 32px; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: var(--text-dim); font-size: 15px; margin-bottom: 32px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .kpi-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .kpi-card .label { color: var(--text-dim); font-size: 13px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .kpi-card .value { font-size: 32px; font-weight: 700; line-height: 1; }
+  .kpi-card .value.green { color: var(--green); }
+  .kpi-card .value.yellow { color: var(--yellow); }
+  .kpi-card .value.red { color: var(--red); }
+  .kpi-card .sub { color: var(--text-dim); font-size: 13px; margin-top: 6px; }
+  .section { margin-bottom: 32px; }
+  .section h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  th { background: var(--surface); color: var(--text-dim); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+  td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .badge-green { background: var(--green-dim); color: var(--green); }
+  .badge-yellow { background: rgba(251,191,36,0.12); color: var(--yellow); }
+  .badge-red { background: rgba(239,68,68,0.12); color: var(--red); }
+  .loading { text-align: center; padding: 60px; color: var(--text-dim); }
+  .loading .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--green); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .rank-num { font-weight: 700; color: var(--text-dim); font-size: 13px; }
+  .num { font-family: 'Inter', monospace; text-align: right; }
+  .progress-bar { height: 4px; background: var(--border); border-radius: 4px; margin-top: 8px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--green); border-radius: 4px; transition: width 0.5s; }
+</style>
+</head>
+<body>
+<nav class="nav">
+  <div class="nav-brand">⬡ Margin Runner <small>$2k/wk target</small></div>
+  <div class="nav-links">
+    <a href="/" class="active">Dashboard</a>
+    <a href="/buys">Buys</a>
+    <a href="/sales">Sales</a>
+  </div>
+</nav>
+<div class="container">
+  <h1>Dashboard</h1>
+  <p class="subtitle">Real-time overview of your arbitrage operation.</p>
+  <div id="kpi-row" class="kpi-grid"></div>
+  <div class="section">
+    <h2>Top Deals</h2>
+    <div id="deals-table"><div class="loading"><div class="spinner"></div>Loading pipeline...</div></div>
+  </div>
+</div>
+
+<script>
+function badge(m) {
+  if (m >= 40) return '<span class="badge badge-green">'+m.toFixed(1)+'%</span>';
+  if (m >= 30) return '<span class="badge badge-yellow">'+m.toFixed(1)+'%</span>';
+  return '<span class="badge badge-red">'+m.toFixed(1)+'%</span>';
+}
+function usd(v) { return '$' + Number(v).toFixed(2); }
+
+async function load() {
+  const res = await fetch('/api/dashboard');
+  const d = await res.json();
+
+  document.getElementById('kpi-row').innerHTML = `
+    <div class="kpi-card"><div class="label">Deals in Pipeline</div><div class="value">${d.total_deals}</div><div class="sub">valued at ${usd(d.total_pipeline_value)}</div></div>
+    <div class="kpi-card"><div class="label">Avg Net Margin</div><div class="value ${d.avg_margin_percent >= 30 ? 'green' : 'yellow'}">${d.avg_margin_percent.toFixed(1)}%</div><div class="sub">target: 30%+</div></div>
+    <div class="kpi-card"><div class="label">Weekly Profit</div><div class="value ${d.current_weekly_profit > 0 ? 'green' : 'red'}">${usd(d.current_weekly_profit)}</div><div class="sub">of ${usd(d.weekly_profit_target)} target<div class="progress-bar"><div class="progress-fill" style="width:${Math.min(d.progress_percent,100)}%"></div></div></div></div>
+    <div class="kpi-card"><div class="label">Inventory</div><div class="value">${d.inventory_count}</div><div class="sub">${usd(d.inventory_cost)} invested</div></div>
+  `;
+
+  let html = `<table><thead><tr><th>#</th><th>Product</th><th>Cost</th><th>Sell Price</th><th>Margin</th><th>Platform</th></tr></thead><tbody>`;
+  d.top_deals.forEach((t, i) => {
+    html += `<tr>
+      <td><span class="rank-num">${i+1}</span></td>
+      <td>${t.product_name}</td>
+      <td class="num">${usd(t.sourcing_cost)}</td>
+      <td class="num">${usd(t.market_price)}</td>
+      <td>${badge(t.estimated_margin_percent)}</td>
+      <td>${t.platform || '—'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('deals-table').innerHTML = html;
+}
+load();
+</script>
+</body>
+</html>
