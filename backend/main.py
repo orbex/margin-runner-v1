@@ -1,37 +1,20 @@
 """
 Margin Runner — Web Dashboard
-FastAPI backend serving deal pipeline, buys, and sales data from team-db.
+FastAPI backend serving deal pipeline, buys, and sales data.
+Self-contained — uses local SQLite database, no external dependencies.
 """
-import subprocess
-import json
-import os
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+
+from database import query
 
 app = FastAPI(title="Margin Runner Dashboard")
 
-STATIC_DIR = Path(__file__).parent / "static"
-
-
-def query_db(sql: str) -> list:
-    """Run a SQL query via team-db CLI and return parsed JSON results."""
-    try:
-        result = subprocess.run(
-            ["team-db", sql],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=15,
-        )
-        return json.loads(result.stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"DB error: {e.stderr}")
-        return []
-    except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
-        print(f"Query failed: {e}")
-        return []
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+HERE = Path(__file__).parent
 
 
 # --- API Endpoints ---
@@ -39,7 +22,7 @@ def query_db(sql: str) -> list:
 @app.get("/api/dashboard")
 def get_dashboard():
     """Aggregate KPIs and top deals for the dashboard overview."""
-    deals = query_db(
+    deals = query(
         "SELECT id, product_name, sourcing_cost, market_price, "
         "estimated_margin_percent, platform, status "
         "FROM deals WHERE status = 'new' "
@@ -54,21 +37,21 @@ def get_dashboard():
         else 0
     )
 
-    inventory = query_db(
+    inv_stats = query(
         "SELECT COUNT(*) as count, "
         "COALESCE(SUM(purchase_price), 0) as total_cost "
         "FROM inventory WHERE status != 'sold'"
     )
-    inv_count = inventory[0]["count"] if inventory else 0
-    inv_cost = inventory[0]["total_cost"] if inventory else 0
+    inv_count = inv_stats[0]["count"] if inv_stats else 0
+    inv_cost = inv_stats[0]["total_cost"] if inv_stats else 0
 
-    sales = query_db(
+    sales_stats = query(
         "SELECT COUNT(*) as count, "
         "COALESCE(SUM(net_profit), 0) as total_profit "
         "FROM sales"
     )
-    sales_count = sales[0]["count"] if sales else 0
-    total_profit = sales[0]["total_profit"] if sales else 0.0
+    sales_count = sales_stats[0]["count"] if sales_stats else 0
+    total_profit = sales_stats[0]["total_profit"] if sales_stats else 0.0
 
     top_deals = deals[:5] if deals else []
 
@@ -89,7 +72,7 @@ def get_dashboard():
 @app.get("/api/deals")
 def get_deals():
     """Full deals pipeline."""
-    deals = query_db(
+    deals = query(
         "SELECT id, product_name, sourcing_cost, market_price, "
         "estimated_fees, estimated_margin, estimated_margin_percent, "
         "platform, source_website, source_location, status, date_found "
@@ -101,7 +84,7 @@ def get_deals():
 @app.get("/api/sales")
 def get_sales():
     """Sales history — real data if exists, empty array if not."""
-    sales = query_db(
+    sales = query(
         "SELECT s.id, s.inventory_id, s.sale_price, s.platform_fees, "
         "s.shipping_cost, s.tax, s.net_profit, s.actual_margin_percent, "
         "s.sale_date, i.product_name "
@@ -114,7 +97,7 @@ def get_sales():
 @app.get("/api/inventory")
 def get_inventory():
     """Current inventory."""
-    items = query_db(
+    items = query(
         "SELECT id, deal_id, product_name, purchase_price, "
         "purchase_date, source, status, listing_price, platform "
         "FROM inventory ORDER BY purchase_date DESC"
@@ -136,10 +119,9 @@ def serve_page(page: str):
     return FileResponse(STATIC_DIR / "index.html")
 
 
-# Mount static files last so they don't override API routes
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(__import__('os').environ.get("PORT", 8000)), reload=False)
