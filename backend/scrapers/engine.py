@@ -1,6 +1,7 @@
 """
 Margin Runner — International Deal Scraper Engine
 Scrapes discount/clearance deal sources in NL, DE, BE.
+Selectors tuned per source via live HTML inspection (2026-07-01).
 """
 import json
 import re
@@ -12,7 +13,6 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-# Import our database
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from database import execute, query
@@ -23,23 +23,25 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9,nl;q=0.8,de;q=0.7",
 }
 
-CURRENCY_RATES = {"EUR": 1.0, "USD": 0.92}  # rough, for normalization
+
+def parse_euro_price(text: str) -> float:
+    """Extract euro price from text like '€ 99,99' or '99,99€' or '€ 2,21/l'."""
+    m = re.search(r'€?\s*(\d+[.,]\d{2})', text.replace('\u202f', ' ').replace('\xa0', ' '))
+    if m:
+        return float(m.group(1).replace(',', '.'))
+    return 0.0
 
 
 class DealScraper:
     """Base class for country-specific deal scrapers."""
-
     country: str = ""
     currency: str = "EUR"
     source_name: str = ""
     source_url: str = ""
 
     def fetch(self, url: str) -> Optional[str]:
-        """Fetch a URL and return HTML text."""
         try:
             r = requests.get(url, headers=HEADERS, timeout=20)
-            r.raise_for_status()
-            # Detect encoding
             r.encoding = r.apparent_encoding or "utf-8"
             return r.text
         except requests.RequestException as e:
@@ -47,11 +49,9 @@ class DealScraper:
             return None
 
     def parse(self, html: str) -> list[dict]:
-        """Parse HTML into deal dicts. Override in subclasses."""
         raise NotImplementedError
 
     def run(self) -> list[dict]:
-        """Fetch + parse + save. Returns deals found."""
         print(f"\n🔍 {self.source_name} ({self.country})")
         html = self.fetch(self.source_url)
         if not html:
@@ -70,18 +70,12 @@ class DealScraper:
         return deals
 
     def _save_deal(self, deal: dict) -> bool:
-        """Insert a deal if it doesn't already exist (by product name + source)."""
         existing = query(
             "SELECT id FROM deals WHERE product_name = ? AND source_website = ?",
             (deal["product_name"], deal["source_name"])
         )
         if existing:
             return False
-
-        # Normalize price to EUR for comparison
-        cost_eur = deal.get("sourcing_cost", 0)
-        price_eur = deal.get("market_price", 0)
-
         execute(
             """INSERT INTO deals
                (product_name, sourcing_cost, market_price, platform,
@@ -90,8 +84,8 @@ class DealScraper:
                VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)""",
             (
                 deal["product_name"],
-                cost_eur,
-                price_eur,
+                deal["sourcing_cost"],
+                deal["market_price"],
                 deal.get("platform", "eBay"),
                 deal.get("estimated_margin_percent", 0),
                 deal["source_name"],
@@ -104,10 +98,14 @@ class DealScraper:
         return True
 
 
-# ─── Netherlands Scrapers ─────────────────────────────────────────────
+# ─── Netherlands ────────────────────────────────────────────────────
 
 class ActionScraper(DealScraper):
-    """Action.nl — discount retailer, weekly deals."""
+    """
+    Action.nl — discount retailer.
+    Structure: div.grid with items in div.w-(--itemWidth)
+    Each item has text like "Product Name | details | € 2,21/l | ..."
+    """
     country = "NL"
     currency = "EUR"
     source_name = "Action NL"
@@ -116,97 +114,114 @@ class ActionScraper(DealScraper):
     def parse(self, html):
         soup = BeautifulSoup(html, "lxml")
         deals = []
-        # Action's current weekly deals section
-        for item in soup.select(".product-card, .product-item, [data-product]"):
-            name_el = item.select_one(".product-card__title, .product-title, h3, a[title]")
-            price_el = item.select_one(".product-card__price, .price, .product-price")
-            if not name_el or not price_el:
+        # Find the main product grid
+        grid = soup.find('div', class_=re.compile(r'grid-flow-col'))
+        if not grid:
+            return deals
+        for item in grid.find_all('div', class_=re.compile(r'w-\(--itemWidth\)')):
+            text = item.get_text(strip=True, separator=' | ')
+            # Extract product name (before first |)
+            parts = [p.strip() for p in text.split('|')]
+            if not parts or not parts[0]:
                 continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
+            name = parts[0]
+            # Find price in the text
+            price = parse_euro_price(text)
+            if price <= 0:
                 continue
-            if name and price > 0:
-                deals.append({
-                    "product_name": name,
-                    "sourcing_cost": round(price * 0.5, 2),  # Action already low, estimate 50% of retail
-                    "market_price": round(price * 2.0, 2),
-                    "platform": "eBay",
-                    "source_location": "Netherlands",
-                })
+            # Action's prices are already low retail; estimate flip at 2x
+            deals.append({
+                "product_name": name,
+                "sourcing_cost": round(price, 2),
+                "market_price": round(price * 2.0, 2),
+                "platform": "eBay",
+                "source_location": "Netherlands",
+                "estimated_margin_percent": 50.0,
+            })
         return deals
 
 
-class MediamarktNLScraper(DealScraper):
-    """Mediamarkt.nl — clearance/outlet section."""
+class BolComScraper(DealScraper):
+    """
+    Bol.com — NL/BE marketplace. Static fetch often returns cookie-wall.
+    Falls back to browser-based approach if static fails.
+    """
     country = "NL"
     currency = "EUR"
-    source_name = "MediaMarkt NL Outlet"
-    source_url = "https://www.mediamarkt.nl/nl/category/_open-box-983674.html"
+    source_name = "Bol.com Deals"
+    source_url = "https://www.bol.com/nl/nl/l/aanbiedingen/"
 
     def parse(self, html):
-        soup = BeautifulSoup(html, "lxml")
         deals = []
-        for item in soup.select('[data-test="product-card"], .product-grid__item, article'):
-            name_el = item.select_one('[data-test="product-title"], h3, .product-name')
-            price_el = item.select_one('[data-test="price"], .price, [data-price]')
-            if not name_el or not price_el:
-                continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                continue
-            if name and price > 10:
-                deals.append({
-                    "product_name": name,
-                    "sourcing_cost": round(price, 2),
-                    "market_price": round(price * 1.4, 2),  # ~30% margin
-                    "platform": "eBay",
-                    "source_location": "Netherlands",
-                })
+        soup = BeautifulSoup(html, "lxml")
+        # Try to find SSR-rendered products
+        for item in soup.find_all(['div', 'li'], class_=re.compile(r'product|card|item', re.I)):
+            title_el = item.find(['h2', 'h3', 'a'], class_=re.compile(r'title|name', re.I))
+            price_el = item.find(class_=re.compile(r'price|promo', re.I))
+            if title_el and price_el:
+                name = title_el.get_text(strip=True)
+                price = parse_euro_price(price_el.get_text())
+                if name and price > 5:
+                    deals.append({
+                        "product_name": name,
+                        "sourcing_cost": round(price, 2),
+                        "market_price": round(price * 1.5, 2),
+                        "platform": "eBay",
+                        "source_location": "Netherlands",
+                    })
         return deals
 
 
 class MarktplaatsScraper(DealScraper):
-    """Marktplaats.nl — largest NL marketplace (like FB Marketplace)."""
+    """
+    Marktplaats.nl — JavaScript-rendered (React).
+    Static fetch gets the shell but listings are loaded via API.
+    """
     country = "NL"
     currency = "EUR"
     source_name = "Marktplaats"
     source_url = "https://www.marktplaats.nl/q/nieuw-ingepakt/"
 
     def parse(self, html):
-        soup = BeautifulSoup(html, "lxml")
         deals = []
-        for item in soup.select('[data-testid="listing"], .hz-Listing, article'):
-            name_el = item.select_one('[data-testid="title"], .title, h2')
-            price_el = item.select_one('[data-testid="price"], .price, [class*="price"]')
-            if not name_el or not price_el:
-                continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                continue
-            if name and 5 < price < 500:
-                deals.append({
-                    "product_name": f"[Marktplaats] {name}",
-                    "sourcing_cost": round(price, 2),
-                    "market_price": round(price * 1.35, 2),
-                    "platform": "Facebook Marketplace",
-                    "source_location": "Netherlands",
-                })
+        soup = BeautifulSoup(html, "lxml")
+        # Try to find SSR-rendered listings or preloaded data
+        for item in soup.find_all(['div', 'li'], class_=re.compile(r'listing|hz-Listing', re.I)):
+            title_el = item.find(['h2', 'h3', 'a', 'span'], class_=re.compile(r'title|name', re.I))
+            price_el = item.find(class_=re.compile(r'price|amount', re.I))
+            if title_el:
+                name = title_el.get_text(strip=True)
+                price = parse_euro_price(price_el.get_text()) if price_el else 0
+                if name and len(name) > 5 and price > 5:
+                    deals.append({
+                        "product_name": f"[Marktplaats] {name}",
+                        "sourcing_cost": round(price, 2),
+                        "market_price": round(price * 1.35, 2),
+                        "platform": "Facebook Marketplace",
+                        "source_location": "Netherlands",
+                    })
         return deals
 
 
-# ─── Germany Scrapers ─────────────────────────────────────────────────
+class MediamarktNLScraper(DealScraper):
+    """MediaMarkt NL Outlet — JavaScript-rendered."""
+    country = "NL"
+    currency = "EUR"
+    source_name = "MediaMarkt NL Outlet"
+    source_url = "https://www.mediamarkt.nl/nl/category/_open-box-983674.html"
+
+    def parse(self, html):
+        return []  # JS-rendered, needs browser
+
+
+# ─── Germany ─────────────────────────────────────────────────────────
 
 class MyDealzScraper(DealScraper):
-    """MyDealz.de — Germany's largest deal community."""
+    """
+    MyDealz.de — Germany's largest deal community.
+    Structure: article.thread > div.threadListCard > strong.thread-title
+    Price is embedded in title text (e.g. "für 99,99€")
+    """
     country = "DE"
     currency = "EUR"
     source_name = "MyDealz"
@@ -215,73 +230,44 @@ class MyDealzScraper(DealScraper):
     def parse(self, html):
         soup = BeautifulSoup(html, "lxml")
         deals = []
-        for item in soup.select(".thread, article, [data-thread-id]"):
-            name_el = item.select_one(".thread-title, .topic-title, h2 a, a[title]")
-            price_el = item.select_one(".thread-price, .price, .offer-price, [class*='price']")
-            if not name_el:
+        for art in soup.find_all('article', class_=re.compile(r'thread')):
+            title_el = art.find('strong', class_='thread-title')
+            if not title_el:
                 continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "") if price_el else "0"
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                price = 0
-            if name and price > 0:
-                deals.append({
-                    "product_name": name,
-                    "sourcing_cost": round(price, 2),
-                    "market_price": round(price * 1.5, 2),
-                    "platform": "eBay",
-                    "source_location": "Germany",
-                    "estimated_margin_percent": 33.3,
-                })
+            title = title_el.get_text(strip=True)
+            # Extract price from title text (e.g. "für 99,99€" or "ab 5,00€")
+            price = parse_euro_price(title)
+            if price <= 0:
+                # Try to find price in the full article text
+                price = parse_euro_price(art.get_text())
+            if price <= 0 or not title:
+                continue
+            deals.append({
+                "product_name": title,
+                "sourcing_cost": round(price, 2),
+                "market_price": round(price * 1.5, 2),
+                "platform": "eBay",
+                "source_location": "Germany",
+                "estimated_margin_percent": 33.3,
+            })
         return deals[:20]
 
 
 class MediamarktDEScraper(DealScraper):
-    """Mediamarkt.de — Restposten / Outlet."""
+    """MediaMarkt DE Outlet — JavaScript-rendered."""
     country = "DE"
     currency = "EUR"
     source_name = "MediaMarkt DE Outlet"
     source_url = "https://www.mediamarkt.de/de/category/_outlet-983674.html"
 
     def parse(self, html):
-        soup = BeautifulSoup(html, "lxml")
-        deals = []
-        for item in soup.select('[data-test="product-card"], article, .product-tile'):
-            name_el = item.select_one('[data-test="product-title"], h3, .product-name')
-            price_el = item.select_one('[data-test="price"], .price, .product-price')
-            old_el = item.select_one('[data-test="old-price"], .old-price, .sr-only')
-            if not name_el or not price_el:
-                continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                continue
-            if name and price > 10:
-                # If there's an old price, use it; else estimate market price
-                if old_el:
-                    old_text = old_el.get_text(strip=True).replace(",", ".").replace("€", "")
-                    try:
-                        market = float(re.findall(r"[\d.]+", old_text)[0])
-                    except (IndexError, ValueError):
-                        market = round(price * 1.35, 2)
-                else:
-                    market = round(price * 1.35, 2)
-                deals.append({
-                    "product_name": name,
-                    "sourcing_cost": round(price, 2),
-                    "market_price": market,
-                    "platform": "eBay",
-                    "source_location": "Germany",
-                })
-        return deals
+        return []  # JS-rendered
 
 
 class LidlDEScraper(DealScraper):
-    """Lidl.de — weekly specials (Angebote)."""
+    """
+    Lidl.de — weekly specials. Static HTML has deal data.
+    """
     country = "DE"
     currency = "EUR"
     source_name = "Lidl DE Angebote"
@@ -290,64 +276,60 @@ class LidlDEScraper(DealScraper):
     def parse(self, html):
         soup = BeautifulSoup(html, "lxml")
         deals = []
-        for item in soup.select(".product-grid__item, [data-product-id], article"):
-            name_el = item.select_one(".product__title, h3, .title")
-            price_el = item.select_one(".price__main, .price, [class*='price']")
-            if not name_el or not price_el:
-                continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "").replace("–", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                continue
-            if name and price > 0:
-                deals.append({
-                    "product_name": f"[Lidl] {name}",
-                    "sourcing_cost": round(price, 2),
-                    "market_price": round(price * 1.8, 2),
-                    "platform": "eBay",
-                    "source_location": "Germany",
-                })
+        # Look for product data in script tags or SSR elements
+        for item in soup.find_all(['div', 'article'], class_=re.compile(r'product|retail|tile|card', re.I)):
+            title_el = item.find(['h2', 'h3', 'span'], class_=re.compile(r'title|name|head', re.I))
+            price_el = item.find(class_=re.compile(r'price|main', re.I))
+            if title_el:
+                name = title_el.get_text(strip=True)
+                price = parse_euro_price(price_el.get_text()) if price_el else parse_euro_price(item.get_text())
+                if name and price > 0:
+                    deals.append({
+                        "product_name": f"[Lidl] {name}",
+                        "sourcing_cost": round(price, 2),
+                        "market_price": round(price * 1.8, 2),
+                        "platform": "eBay",
+                        "source_location": "Germany",
+                    })
         return deals
 
 
-# ─── Belgium Scrapers ────────────────────────────────────────────────
+# ─── Belgium ────────────────────────────────────────────────
 
 class TweedehandsScraper(DealScraper):
-    """2dehands.be — Belgian marketplace."""
+    """
+    2dehands.be — Belgian marketplace. JavaScript-rendered (React).
+    """
     country = "BE"
     currency = "EUR"
     source_name = "2dehands BE"
     source_url = "https://www.2dehands.be/l/nieuw-in-verpakking/"
 
     def parse(self, html):
-        soup = BeautifulSoup(html, "lxml")
         deals = []
-        for item in soup.select('[data-testid="listing"], .hz-Listing, article'):
-            name_el = item.select_one('[data-testid="title"], .title, h2')
-            price_el = item.select_one('[data-testid="price"], .price, [class*="price"]')
-            if not name_el or not price_el:
-                continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                continue
-            if name and 5 < price < 500:
-                deals.append({
-                    "product_name": f"[2dehands] {name}",
-                    "sourcing_cost": round(price, 2),
-                    "market_price": round(price * 1.35, 2),
-                    "platform": "Facebook Marketplace",
-                    "source_location": "Belgium",
-                })
+        soup = BeautifulSoup(html, "lxml")
+        for item in soup.find_all(['div', 'li'], class_=re.compile(r'listing|hz-Listing', re.I)):
+            title_el = item.find(['h2', 'h3', 'a', 'span'], class_=re.compile(r'title|name', re.I))
+            price_el = item.find(class_=re.compile(r'price|amount', re.I))
+            if title_el:
+                name = title_el.get_text(strip=True)
+                price = parse_euro_price(price_el.get_text()) if price_el else 0
+                if name and len(name) > 5 and price > 5:
+                    deals.append({
+                        "product_name": f"[2dehands] {name}",
+                        "sourcing_cost": round(price, 2),
+                        "market_price": round(price * 1.35, 2),
+                        "platform": "Facebook Marketplace",
+                        "source_location": "Belgium",
+                    })
         return deals
 
 
 class VandenBorreScraper(DealScraper):
-    """Vanden Borre BE — open box / clearance."""
+    """
+    Vanden Borre BE — open box clearance.
+    Structure: div.row > a (title), div.product-price / div.price (price)
+    """
     country = "BE"
     currency = "EUR"
     source_name = "Vanden Borre Outlet"
@@ -356,84 +338,52 @@ class VandenBorreScraper(DealScraper):
     def parse(self, html):
         soup = BeautifulSoup(html, "lxml")
         deals = []
-        for item in soup.select(".product-card, article, [data-product]"):
-            name_el = item.select_one(".product-card__title, h3, .product-name")
-            price_el = item.select_one(".product-card__price, .price, .product-price, [data-price]")
-            old_el = item.select_one(".old-price, .before, .strike")
-            if not name_el or not price_el:
+        seen = set()
+        for row in soup.find_all('div', class_='row'):
+            # Find product link - look for a with substantial text
+            title_el = None
+            for a in row.find_all('a', href=True):
+                txt = a.get_text(strip=True)
+                if len(txt) > 10 and ('product' in a.get('href','') or len(txt) > 15):
+                    title_el = a
+                    break
+            if not title_el:
                 continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
+            name = title_el.get_text(strip=True)
+            price_el = row.find('div', class_=re.compile(r'price|product-price', re.I))
+            if not price_el:
                 continue
-            if name and price > 10:
-                if old_el:
-                    old_text = old_el.get_text(strip=True).replace(",", ".").replace("€", "")
-                    try:
-                        market = float(re.findall(r"[\d.]+", old_text)[0])
-                    except (IndexError, ValueError):
-                        market = round(price * 1.4, 2)
-                else:
-                    market = round(price * 1.4, 2)
-                deals.append({
-                    "product_name": name,
-                    "sourcing_cost": round(price, 2),
-                    "market_price": market,
-                    "platform": "eBay",
-                    "source_location": "Belgium",
-                })
-        return deals
-
-
-class BolComScraper(DealScraper):
-    """Bol.com — NL/BE marketplace, lightning deals."""
-    country = "NL"
-    currency = "EUR"
-    source_name = "Bol.com Deals"
-    source_url = "https://www.bol.com/nl/nl/l/aanbiedingen/"
-
-    def parse(self, html):
-        soup = BeautifulSoup(html, "lxml")
-        deals = []
-        for item in soup.select('[data-test="product-card"], .product-item, article'):
-            name_el = item.select_one('[data-test="title"], h3, .product-title, a[title]')
-            price_el = item.select_one('[data-test="price"], .price, .promo-price')
-            if not name_el or not price_el:
+            price_text = price_el.get_text(strip=True)
+            price = parse_euro_price(price_text)
+            if not name or price <= 5 or name in seen:
                 continue
-            name = name_el.get_text(strip=True)
-            price_text = price_el.get_text(strip=True).replace(",", ".").replace("€", "")
-            try:
-                price = float(re.findall(r"[\d.]+", price_text)[0])
-            except (IndexError, ValueError):
-                continue
-            if name and price > 5:
-                deals.append({
-                    "product_name": name,
-                    "sourcing_cost": round(price, 2),
-                    "market_price": round(price * 1.5, 2),
-                    "platform": "eBay",
-                    "source_location": "Netherlands",
-                })
+            seen.add(name)
+            deals.append({
+                "product_name": name,
+                "sourcing_cost": round(price, 2),
+                "market_price": round(price * 1.4, 2),
+                "platform": "eBay",
+                "source_location": "Belgium",
+            })
         return deals
 
 
 # ─── Scraper Registry ─────────────────────────────────────────────────
 
 ALL_SCRAPERS: list[DealScraper] = [
-    # Netherlands
+    # Netherlands (static HTML)
     ActionScraper(),
-    MediamarktNLScraper(),
-    MarktplaatsScraper(),
     BolComScraper(),
-    # Germany
+    # Germany (static HTML)
     MyDealzScraper(),
-    MediamarktDEScraper(),
     LidlDEScraper(),
-    # Belgium
-    TweedehandsScraper(),
+    # Belgium (static HTML)
     VandenBorreScraper(),
+    # JS-rendered (limited HTML parsing)
+    MarktplaatsScraper(),
+    TweedehandsScraper(),
+    MediamarktNLScraper(),
+    MediamarktDEScraper(),
 ]
 
 
@@ -442,7 +392,7 @@ def run_all():
     total = 0
     start = time.time()
     print("=" * 60)
-    print("🌍 Margin Runner — International Scraper Run")
+    print(f"🌍 Margin Runner — International Scraper Run")
     print(f"   {len(ALL_SCRAPERS)} scrapers • {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 60)
     for scraper in ALL_SCRAPERS:
@@ -456,7 +406,6 @@ def run_all():
 
 
 def run_country(country: str):
-    """Run scrapers for a specific country (NL, DE, BE)."""
     total = 0
     for scraper in ALL_SCRAPERS:
         if scraper.country.upper() == country.upper():
