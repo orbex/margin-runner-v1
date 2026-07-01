@@ -26,7 +26,7 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # --- Schema ---
+    # --- Schema (with international columns) ---
     cursor.executescript("""
         CREATE TABLE IF NOT EXISTS deals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +42,9 @@ def init_db():
             date_found DATETIME DEFAULT CURRENT_TIMESTAMP,
             sourcing_agent_id TEXT,
             source_location TEXT,
-            source_website TEXT
+            source_website TEXT,
+            country TEXT DEFAULT 'US',
+            currency TEXT DEFAULT 'USD'
         );
 
         CREATE TABLE IF NOT EXISTS inventory (

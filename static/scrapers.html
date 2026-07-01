@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Margin Runner — Scrapers</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #0a0e1a; --surface: #111827; --card: #1a2236; --border: #1f2a45; --text: #e2e8f0; --text-dim: #8892b0; --green: #00e676; --green-dim: rgba(0,230,118,0.12); --yellow: #fbbf24; --red: #ef4444; --radius: 12px; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 32px; display: flex; align-items: center; height: 64px; gap: 32px; position: sticky; top: 0; z-index: 100; }
+  .nav-brand { font-weight: 800; font-size: 20px; color: var(--green); }
+  .nav-brand small { font-weight: 400; font-size: 13px; color: var(--text-dim); margin-left: 8px; }
+  .nav-links { display: flex; gap: 4px; }
+  .nav-links a { color: var(--text-dim); text-decoration: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; }
+  .nav-links a:hover, .nav-links a.active { color: var(--text); background: rgba(255,255,255,0.06); }
+  .nav-links a.active { color: var(--green); }
+  .container { max-width: 1280px; margin: 0 auto; padding: 32px; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: var(--text-dim); font-size: 15px; margin-bottom: 32px; }
+  
+  .scraper-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .scraper-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .scraper-card .flag { font-size: 24px; margin-bottom: 8px; }
+  .scraper-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+  .scraper-card .url { color: var(--text-dim); font-size: 12px; margin-bottom: 12px; word-break: break-all; }
+  .scraper-card .status { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; }
+  
+  .btn { display: inline-block; padding: 8px 20px; border-radius: 8px; font-size: 14px; font-weight: 600; border: none; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+  .btn-primary { background: var(--green); color: #000; }
+  .btn-primary:hover { background: #00c853; }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--green); color: var(--green); }
+  
+  .batch-bar { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 32px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .batch-bar .label { font-size: 14px; font-weight: 600; }
+  .result-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-top: 16px; font-size: 14px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; display: none; }
+  .loading { text-align: center; padding: 40px; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<nav class="nav">
+  <div class="nav-brand">⬡ Margin Runner <small>$2k/wk target</small></div>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/buys">Buys</a>
+    <a href="/sales">Sales</a>
+    <a href="/scrapers" class="active">Scrapers</a>
+  </div>
+</nav>
+<div class="container">
+  <h1>🌍 Deal Scrapers</h1>
+  <p class="subtitle">Automated connectors for NL, DE, and BE deal sources.</p>
+
+  <div class="batch-bar">
+    <span class="label">⚡ Run All</span>
+    <button class="btn btn-primary" onclick="runScrape('all')">🌍 All Countries</button>
+    <button class="btn btn-outline" onclick="runScrape('NL')">🇳🇱 Netherlands</button>
+    <button class="btn btn-outline" onclick="runScrape('DE')">🇩🇪 Germany</button>
+    <button class="btn btn-outline" onclick="runScrape('BE')">🇧🇪 Belgium</button>
+  </div>
+  <div id="result-box" class="result-box"></div>
+
+  <div id="scraper-list"><div class="loading">Loading scrapers...</div></div>
+</div>
+
+<script>
+function flag(c) {
+  if (c == 'NL') return '🇳🇱'; if (c == 'DE') return '🇩🇪'; if (c == 'BE') return '🇧🇪';
+  return '🌍';
+}
+
+async function loadScrapers() {
+  const r = await fetch('/api/scrape/status');
+  const j = await r.json();
+  document.getElementById('scraper-list').innerHTML = '<div class="scraper-grid">' +
+    j.scrapers.map(s => `
+      <div class="scraper-card">
+        <div class="flag">${flag(s.country)}</div>
+        <h3>${s.name}</h3>
+        <div class="url">${s.url}</div>
+        <div class="status">📍 ${s.country}</div>
+        <button class="btn btn-outline" onclick="runScrape('${s.country}')">Run</button>
+      </div>
+    `).join('') + '</div>';
+}
+
+async function runScrape(country) {
+  const box = document.getElementById('result-box');
+  box.style.display = 'block';
+  box.textContent = country === 'all' ? '🌍 Running all scrapers...' : `${flag(country)} Running ${country} scrapers...`;
+  
+  const url = country === 'all' ? '/api/scrape' : `/api/scrape?country=${country}`;
+  try {
+    const r = await fetch(url, { method: 'POST' });
+    const j = await r.json();
+    if (j.status === 'ok') {
+      box.textContent = `✅ ${j.deals_found} new deals found${country !== 'all' ? ' in ' + country : ' across all sources'}!`;
+    } else {
+      box.textContent = `❌ Error: ${j.message}`;
+    }
+  } catch(e) {
+    box.textContent = `❌ Request failed: ${e.message}`;
+  }
+  
+  // Refresh scraper list to show updated counts
+  setTimeout(loadScrapers, 1000);
+}
+
+loadScrapers();
+</script>
+</body>
+</html>

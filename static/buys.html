@@ -20,8 +20,9 @@
   h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
   .subtitle { color: var(--text-dim); font-size: 15px; margin-bottom: 32px; }
   .filters { margin-bottom: 16px; display: flex; gap: 12px; flex-wrap: wrap; }
-  .filters input { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 14px; width: 280px; font-family: inherit; outline: none; }
-  .filters input:focus { border-color: var(--green); }
+  .filters input, .filters select { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 14px; font-family: inherit; outline: none; }
+  .filters input:focus, .filters select:focus { border-color: var(--green); }
+  .filters select { min-width: 160px; cursor: pointer; }
   table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   th { background: var(--surface); color: var(--text-dim); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
   td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
@@ -45,6 +46,7 @@
     <a href="/">Dashboard</a>
     <a href="/buys" class="active">Buys</a>
     <a href="/sales">Sales</a>
+    <a href="/scrapers">Scrapers</a>
   </div>
 </nav>
 <div class="container">
@@ -52,6 +54,13 @@
   <p class="subtitle">All sourced deals ranked by net margin.</p>
   <div class="filters">
     <input type="text" id="search" placeholder="Search products..." oninput="filter()">
+    <select id="country-filter" onchange="filter()">
+      <option value="">All Countries</option>
+      <option value="NL">🇳🇱 Netherlands</option>
+      <option value="DE">🇩🇪 Germany</option>
+      <option value="BE">🇧🇪 Belgium</option>
+      <option value="US">🇺🇸 USA</option>
+    </select>
   </div>
   <div id="count" class="count"></div>
   <div id="table"><div class="loading">Loading deals...</div></div>
@@ -73,12 +82,18 @@ function rowClass(m) {
   return 'row-red';
 }
 
+function flag(c) {
+  if (c == 'NL') return '🇳🇱'; if (c == 'DE') return '🇩🇪'; if (c == 'BE') return '🇧🇪';
+  return '🇺🇸';
+}
+
 function render(deals) {
-  let html = '<table><thead><tr><th>Rank</th><th>Product</th><th>Cost</th><th>Sell Price</th><th>Fees</th><th>Net Profit</th><th>Net Margin</th><th>Platform</th><th>Source</th><th>Status</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Rank</th><th>Product</th><th>Country</th><th>Cost</th><th>Sell Price</th><th>Fees</th><th>Net Profit</th><th>Net Margin</th><th>Platform</th><th>Source</th><th>Status</th></tr></thead><tbody>';
   deals.forEach((t, i) => {
     html += `<tr class="${rowClass(t.estimated_margin_percent)}">
       <td>${i+1}</td>
       <td>${t.product_name}</td>
+      <td>${flag(t.country)} ${t.country || 'US'}</td>
       <td class="num">${usd(t.sourcing_cost)}</td>
       <td class="num">${usd(t.market_price)}</td>
       <td class="num">${usd(t.estimated_fees)}</td>
@@ -96,7 +111,12 @@ function render(deals) {
 
 function filter() {
   const q = document.getElementById('search').value.toLowerCase();
-  render(db.filter(d => d.product_name.toLowerCase().includes(q)));
+  const country = document.getElementById('country-filter').value;
+  render(db.filter(d => {
+    if (q && !d.product_name.toLowerCase().includes(q)) return false;
+    if (country && (d.country || 'US') !== country) return false;
+    return true;
+  }));
 }
 
 async function load() {
